@@ -3,7 +3,13 @@
 #
 # BUILDER
 #
-FROM docker.io/library/golang:1.24 AS builder
+# lazedo: build on the NATIVE platform and cross-compile for TARGETARCH —
+# running the Go toolchain under qemu-user emulation (the buildx default for
+# foreign platforms) crashes the Go runtime (register-dump SIGSEGV in
+# `go mod download`).
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.24 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /buildroot
 
@@ -24,7 +30,7 @@ COPY sidecar/pkg/ sidecar/pkg/
 
 WORKDIR /buildroot/sidecar
 
-RUN CGO_ENABLED=0 go build -o /buildroot/artifacts/sidecar cmd/*.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /buildroot/artifacts/sidecar cmd/*.go
 
 
 #
