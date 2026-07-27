@@ -123,8 +123,19 @@ func (b *BucketListener) Add(ctx context.Context, inputBucket *v1alpha1.Bucket) 
 			}
 		}
 	} else {
+		// lazedo: expose the originating BucketClaim's namespace to the driver
+		// so multi-tenancy drivers can route (e.g. per-subscription minio
+		// tenant) or scope naming. Copied map — never mutate the shared spec.
+		params := make(map[string]string, len(bucket.Spec.Parameters)+2)
+		for k, v := range bucket.Spec.Parameters {
+			params[k] = v
+		}
+		if bucket.Spec.BucketClaim != nil {
+			params["cosi.lazedo.dev/claim-namespace"] = bucket.Spec.BucketClaim.Namespace
+			params["cosi.lazedo.dev/claim-name"] = bucket.Spec.BucketClaim.Name
+		}
 		req := &cosi.DriverCreateBucketRequest{
-			Parameters: bucket.Spec.Parameters,
+			Parameters: params,
 			Name:       bucket.ObjectMeta.Name,
 		}
 

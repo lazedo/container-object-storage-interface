@@ -168,11 +168,21 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 
 	accountName := consts.AccountNamePrefix + string(bucketAccess.UID)
 
+	// lazedo: expose the BucketAccess's namespace to the driver so
+	// multi-tenancy drivers can route the grant (and the advertised endpoint)
+	// per subscription. Copied map — never mutate the shared class parameters.
+	params := make(map[string]string, len(bucketAccessClass.Parameters)+2)
+	for k, v := range bucketAccessClass.Parameters {
+		params[k] = v
+	}
+	params["cosi.lazedo.dev/access-namespace"] = bucketAccess.ObjectMeta.Namespace
+	params["cosi.lazedo.dev/access-name"] = bucketAccess.ObjectMeta.Name
+
 	req := &cosi.DriverGrantBucketAccessRequest{
 		BucketId:           bucket.Status.BucketID,
 		Name:               accountName,
 		AuthenticationType: authType,
-		Parameters:         bucketAccessClass.Parameters,
+		Parameters:         params,
 	}
 
 	// This needs to be idempotent

@@ -2,7 +2,10 @@ package bucketclaim
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,10 +28,39 @@ type BucketClaimListener struct {
 
 	kubeClient   kubeclientset.Interface
 	bucketClient bucketclientset.Interface
+
+	// tenancyNSPrefix: claims in namespaces with this prefix (kube-bind
+	// tenancies) get the namespace remainder prefixed onto the bucket name so
+	// equal claim names in different tenancies never collide. Empty = off.
+	tenancyNSPrefix string
 }
 
 func NewBucketClaimListener() *BucketClaimListener {
 	return &BucketClaimListener{}
+}
+
+// NewTenancyBucketClaimListener returns a listener that prefixes bucket names
+// for claims made inside tenancy namespaces (see tenancyNSPrefix).
+func NewTenancyBucketClaimListener(tenancyNSPrefix string) *BucketClaimListener {
+	return &BucketClaimListener{tenancyNSPrefix: tenancyNSPrefix}
+}
+
+// bucketNameFor derives the cluster-wide Bucket (and object-store bucket) name
+// for a claim. Outside tenancies it is the claim name (lazedo naming). Inside a
+// tenancy namespace it is "<tenancy>-<claim>", capped to S3's 63-char limit
+// with a stable hash suffix when truncation is needed.
+func (b *BucketClaimListener) bucketNameFor(bucketClaim *v1alpha1.BucketClaim) string {
+	name := bucketClaim.ObjectMeta.Name
+	if b.tenancyNSPrefix == "" || !strings.HasPrefix(bucketClaim.ObjectMeta.Namespace, b.tenancyNSPrefix) {
+		return name
+	}
+	tenant := strings.TrimPrefix(bucketClaim.ObjectMeta.Namespace, b.tenancyNSPrefix)
+	full := tenant + "-" + name
+	if len(full) <= 63 {
+		return full
+	}
+	sum := sha256.Sum256([]byte(full))
+	return full[:54] + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
 // Add creates a bucket in response to a bucketClaim
@@ -102,13 +134,42 @@ func (b *BucketClaimListener) handleDeletion(ctx context.Context, bucketClaim *v
 
 	bucketName := bucketClaim.Status.BucketName
 	if bucketName != "" {
+		// lazedo: drop this claim's reference; only delete the Bucket object once
+		// no claim references it. The Bucket's DeletionPolicy is applied downstream.
+		empty, err := b.removeClaimRef(ctx, bucketName, bucketClaim.ObjectMeta.UID)
+		if err != nil {
+			klog.V(3).ErrorS(err, "Error updating bucket ref-set",
+				"bucket", bucketName, "bucketClaim", bucketClaim.ObjectMeta.Name)
+			return b.recordError(bucketClaim, v1.EventTypeWarning, v1alpha1.FailedDeleteBucket, err)
+		}
+		if !empty {
+			klog.V(5).Infof("bucket %s still referenced by other claims; detaching claim %s only",
+				bucketName, bucketClaim.ObjectMeta.Name)
+			// The sidecar removes the claim's finalizer when the Bucket object is
+			// deleted; since we keep the shared Bucket, we must remove it here or
+			// this claim would hang forever.
+			return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest, gerr := b.bucketClaims(bucketClaim.Namespace).Get(ctx, bucketClaim.Name, metav1.GetOptions{})
+				if kubeerrors.IsNotFound(gerr) {
+					return nil
+				}
+				if gerr != nil {
+					return gerr
+				}
+				if controllerutil.RemoveFinalizer(latest, util.BucketClaimFinalizer) {
+					_, uerr := b.bucketClaims(latest.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+					return uerr
+				}
+				return nil
+			})
+		}
 		if err := b.buckets().Delete(ctx, bucketName, metav1.DeleteOptions{}); err != nil && !kubeerrors.IsNotFound(err) {
 			klog.V(3).ErrorS(err, "Error deleting bucket",
 				"bucket", bucketName,
 				"bucketClaim", bucketClaim.ObjectMeta.Name)
 			return b.recordError(bucketClaim, v1.EventTypeWarning, v1alpha1.FailedDeleteBucket, err)
 		}
-		klog.V(5).Infof("Successfully requested deletion of bucket: %s for bucketClaim: %s",
+		klog.V(5).Infof("last reference gone; requested deletion of bucket: %s for bucketClaim: %s",
 			bucketName, bucketClaim.ObjectMeta.Name)
 	}
 
@@ -184,7 +245,13 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 			return b.recordError(inputBucketClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
 		}
 
-		bucketName = fmt.Sprintf("bucket-%s", bucketClaim.ObjectMeta.UID)
+		// lazedo: name the Bucket (and therefore the real object-store bucket and
+		// the advertised BucketInfo name) after the BucketClaim, so users get the
+		// name they indicated instead of bucket-<uid>. Buckets are cluster-scoped
+		// and the object-store bucket namespace is flat; claims from tenancy
+		// namespaces get a per-tenancy prefix (bucketNameFor) so equal claim
+		// names in different subscriptions never collide.
+		bucketName = b.bucketNameFor(bucketClaim)
 
 		// create bucket
 		bucket := &v1alpha1.Bucket{}
@@ -215,6 +282,12 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 
 		bucketClaim.Status.BucketName = bucketName
 		bucketClaim.Status.BucketReady = false
+	}
+
+	// lazedo: record this claim in the Bucket's ref-set so a shared bucket is
+	// only deleted when the last referencing claim goes away.
+	if err := b.addClaimRef(ctx, bucketName, bucketClaim.ObjectMeta.UID); err != nil {
+		return b.recordError(inputBucketClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
 	}
 
 	// Update status with retry logic for conflict errors

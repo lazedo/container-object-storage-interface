@@ -27,6 +27,7 @@ var cmd = &cobra.Command{
 
 var kubeConfig string
 var verbosity int
+var tenancyNSPrefix string
 
 func init() {
 	viper.AutomaticEnv()
@@ -37,6 +38,7 @@ func init() {
 
 	cmd.PersistentFlags().AddGoFlagSet(kflags)
 	cmd.PersistentFlags().StringVarP(&kubeConfig, "kubeconfig", "", kubeConfig, "path to kubeconfig file")
+	cmd.PersistentFlags().StringVar(&tenancyNSPrefix, "tenancy-ns-prefix", "", "BucketClaims in namespaces with this prefix (e.g. kube-bind-) get the namespace remainder prefixed onto the Bucket/object-store name, so equal claim names in different tenancies never collide. Claims in other namespaces keep the claim name as-is.")
 
 	//flag.CommandLine.Parse([]string{})
 	viper.BindPFlags(cmd.PersistentFlags())
@@ -64,6 +66,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctrl.AddBucketClaimListener(bucketclaim.NewBucketClaimListener())
+	ctrl.AddBucketClaimListener(bucketclaim.NewTenancyBucketClaimListener(tenancyNSPrefix))
 	return ctrl.Run(ctx)
 }

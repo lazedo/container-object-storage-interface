@@ -2,6 +2,7 @@
 kind: Deployment
 apiVersion: apps/v1
 metadata:
+  namespace: system
   name: controller
   labels:
     app: container-object-storage-interface-controller
@@ -22,6 +23,6 @@ spec:
       serviceAccountName: controller-sa
       containers:
         - name: objectstorage-controller
-          image: gcr.io/k8s-staging-sig-storage/objectstorage-controller:v20250905-controllerv0.2.0-rc1-100-gd904c62
+          image: ghcr.io/lazedo/objectstorage-controller:v0.2.0-rc1-100-gd904c62
           args:
             - "--v=5"
