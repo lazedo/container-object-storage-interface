@@ -1,0 +1,129 @@
+# lazedo fork: build the COSI controller and sidecar and publish them to GHCR.
+#
+# Both are forks, not mirrors: the sidecar passes the originating BucketClaim's
+# namespace to the driver and the controller derives tenancy-scoped bucket
+# names, neither of which upstream does. They ship together because a driver
+# relies on both halves of that contract.
+#
+# Both Dockerfiles build from the repo root (they copy client/, proto/,
+# internal/ and vendor/), so the context is "." with the file selected per
+# image.
+#
+# Each arch builds on a NATIVE runner and the two are joined by digest into one
+# manifest — no QEMU. Images carry the short commit SHA; a release additionally
+# carries its tag.
+name: image
+
+on:
+  push:
+    branches:
+      - release-0.2
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: lazedo-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [objectstorage-controller, objectstorage-sidecar]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - image: objectstorage-controller
+            dockerfile: controller/Dockerfile
+          - image: objectstorage-sidecar
+            dockerfile: sidecar/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.image }}-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [objectstorage-controller, objectstorage-sidecar]
+    steps:
+      - name: Short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}"
+          TAGS="-t ${IMAGE}:${{ steps.sha.outputs.short }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAGS="${TAGS} -t ${IMAGE}:${{ github.ref_name }} -t ${IMAGE}:latest"
+          elif [ "${{ github.ref_name }}" = "release-0.2" ]; then
+            TAGS="${TAGS} -t ${IMAGE}:latest"
+          fi
+          # shellcheck disable=SC2046
+          docker buildx imagetools create ${TAGS} \
+            $(for f in /tmp/digests/*; do echo "${IMAGE}@$(cat "$f")"; done)
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.sha.outputs.short }}"
+          echo "\`${IMAGE}:${{ steps.sha.outputs.short }}\` (amd64+arm64)" >> "$GITHUB_STEP_SUMMARY"
