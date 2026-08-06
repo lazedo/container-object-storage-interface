@@ -159,6 +159,23 @@ type BucketClaimSpec struct {
 	// If unspecified, then a new Bucket will be dynamically provisioned
 	// +optional
 	ExistingBucketName string `json:"existingBucketName,omitempty"`
+
+	// lazedo: sharing semantics. The default (both false) is create-or-adopt:
+	// a claim whose derived bucket name already exists binds to the existing
+	// Bucket (same class/connection only) instead of pending forever.
+	//
+	// RequireNew demands the bucket be born with this claim: if the Bucket
+	// object or the backend bucket already exists, provisioning fails
+	// immediately (Event + condition), never silently adopts.
+	// +optional
+	RequireNew bool `json:"requireNew,omitempty"`
+
+	// Exclusive demands this claim be the bucket's only binder, at bind time
+	// and for as long as it stays bound: the Bucket records the mode of its
+	// first binder, later shared claims are refused, and an exclusive claim
+	// over a bucket that already has binders fails immediately.
+	// +optional
+	Exclusive bool `json:"exclusive,omitempty"`
 }
 
 type BucketClaimStatus struct {
@@ -171,6 +188,24 @@ type BucketClaimStatus struct {
 	// before making the creation request to the OSP backend.
 	// +optional
 	BucketName string `json:"bucketName,omitempty"`
+
+	// lazedo: Adopted is true when this claim bound to a pre-existing Bucket
+	// instead of creating it — visibility against silent sharing by name
+	// collision.
+	// +optional
+	Adopted bool `json:"adopted,omitempty"`
+
+	// lazedo: Binders is the number of claims bound to the bucket as of the
+	// last reconcile of this claim's binding.
+	// +optional
+	Binders int32 `json:"binders,omitempty"`
+
+	// lazedo: Conditions surface terminal provisioning refusals (requireNew
+	// failed, exclusivity denied) instead of a silent pending.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

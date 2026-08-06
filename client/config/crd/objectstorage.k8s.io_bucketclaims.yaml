@@ -3,7 +3,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    api-approved.kubernetes.io: "https://github.com/kubernetes/enhancements/pull/2079"
     controller-gen.kubebuilder.io/version: v0.17.3
   name: bucketclaims.objectstorage.k8s.io
 spec:
@@ -41,6 +40,13 @@ spec:
               bucketClassName:
                 description: Name of the BucketClass
                 type: string
+              exclusive:
+                description: |-
+                  Exclusive demands this claim be the bucket's only binder, at bind time
+                  and for as long as it stays bound: the Bucket records the mode of its
+                  first binder, later shared claims are refused, and an exclusive claim
+                  over a bucket that already has binders fails immediately.
+                type: boolean
               existingBucketName:
                 description: |-
                   Name of a bucket object that was manually
@@ -57,11 +63,33 @@ spec:
                 items:
                   type: string
                 type: array
+              requireNew:
+                description: |-
+                  lazedo: sharing semantics. The default (both false) is create-or-adopt:
+                  a claim whose derived bucket name already exists binds to the existing
+                  Bucket (same class/connection only) instead of pending forever.
+
+                  RequireNew demands the bucket be born with this claim: if the Bucket
+                  object or the backend bucket already exists, provisioning fails
+                  immediately (Event + condition), never silently adopts.
+                type: boolean
             required:
             - protocols
             type: object
           status:
             properties:
+              adopted:
+                description: |-
+                  lazedo: Adopted is true when this claim bound to a pre-existing Bucket
+                  instead of creating it — visibility against silent sharing by name
+                  collision.
+                type: boolean
+              binders:
+                description: |-
+                  lazedo: Binders is the number of claims bound to the bucket as of the
+                  last reconcile of this claim's binding.
+                format: int32
+                type: integer
               bucketName:
                 description: |-
                   BucketName is the name of the provisioned Bucket in response
@@ -73,6 +101,68 @@ spec:
                   BucketReady indicates that the bucket is ready for consumpotion
                   by workloads
                 type: boolean
+              conditions:
+                description: |-
+                  lazedo: Conditions surface terminal provisioning refusals (requireNew
+                  failed, exclusivity denied) instead of a silent pending.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             required:
             - bucketReady
             type: object

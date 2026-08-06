@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,13 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	context "context"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	gentype "k8s.io/client-go/gentype"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 	scheme "sigs.k8s.io/container-object-storage-interface/client/clientset/versioned/scheme"
 )
 
@@ -37,33 +37,34 @@ type BucketClaimsGetter interface {
 
 // BucketClaimInterface has methods to work with BucketClaim resources.
 type BucketClaimInterface interface {
-	Create(ctx context.Context, bucketClaim *v1alpha1.BucketClaim, opts v1.CreateOptions) (*v1alpha1.BucketClaim, error)
-	Update(ctx context.Context, bucketClaim *v1alpha1.BucketClaim, opts v1.UpdateOptions) (*v1alpha1.BucketClaim, error)
+	Create(ctx context.Context, bucketClaim *objectstoragev1alpha1.BucketClaim, opts v1.CreateOptions) (*objectstoragev1alpha1.BucketClaim, error)
+	Update(ctx context.Context, bucketClaim *objectstoragev1alpha1.BucketClaim, opts v1.UpdateOptions) (*objectstoragev1alpha1.BucketClaim, error)
 	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-	UpdateStatus(ctx context.Context, bucketClaim *v1alpha1.BucketClaim, opts v1.UpdateOptions) (*v1alpha1.BucketClaim, error)
+	UpdateStatus(ctx context.Context, bucketClaim *objectstoragev1alpha1.BucketClaim, opts v1.UpdateOptions) (*objectstoragev1alpha1.BucketClaim, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
-	Get(ctx context.Context, name string, opts v1.GetOptions) (*v1alpha1.BucketClaim, error)
-	List(ctx context.Context, opts v1.ListOptions) (*v1alpha1.BucketClaimList, error)
+	Get(ctx context.Context, name string, opts v1.GetOptions) (*objectstoragev1alpha1.BucketClaim, error)
+	List(ctx context.Context, opts v1.ListOptions) (*objectstoragev1alpha1.BucketClaimList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
-	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.BucketClaim, err error)
+	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *objectstoragev1alpha1.BucketClaim, err error)
 	BucketClaimExpansion
 }
 
 // bucketClaims implements BucketClaimInterface
 type bucketClaims struct {
-	*gentype.ClientWithList[*v1alpha1.BucketClaim, *v1alpha1.BucketClaimList]
+	*gentype.ClientWithList[*objectstoragev1alpha1.BucketClaim, *objectstoragev1alpha1.BucketClaimList]
 }
 
 // newBucketClaims returns a BucketClaims
 func newBucketClaims(c *ObjectstorageV1alpha1Client, namespace string) *bucketClaims {
 	return &bucketClaims{
-		gentype.NewClientWithList[*v1alpha1.BucketClaim, *v1alpha1.BucketClaimList](
+		gentype.NewClientWithList[*objectstoragev1alpha1.BucketClaim, *objectstoragev1alpha1.BucketClaimList](
 			"bucketclaims",
 			c.RESTClient(),
 			scheme.ParameterCodec,
 			namespace,
-			func() *v1alpha1.BucketClaim { return &v1alpha1.BucketClaim{} },
-			func() *v1alpha1.BucketClaimList { return &v1alpha1.BucketClaimList{} }),
+			func() *objectstoragev1alpha1.BucketClaim { return &objectstoragev1alpha1.BucketClaim{} },
+			func() *objectstoragev1alpha1.BucketClaimList { return &objectstoragev1alpha1.BucketClaimList{} },
+		),
 	}
 }

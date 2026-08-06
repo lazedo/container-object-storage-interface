@@ -9,6 +9,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubeclientset "k8s.io/client-go/kubernetes"
@@ -135,8 +136,16 @@ func (b *BucketClaimListener) handleDeletion(ctx context.Context, bucketClaim *v
 	bucketName := bucketClaim.Status.BucketName
 	if bucketName != "" {
 		// lazedo: drop this claim's reference; only delete the Bucket object once
-		// no claim references it. The Bucket's DeletionPolicy is applied downstream.
-		empty, err := b.removeClaimRef(ctx, bucketName, bucketClaim.ObjectMeta.UID)
+		// no claim references it. The LAST binder to leave decides the data's
+		// fate: its class's deletionPolicy is written onto the Bucket in the
+		// same update (removeClaimRef), and applied downstream by the sidecar.
+		lastBinderPolicy := v1alpha1.DeletionPolicy("")
+		if cn := bucketClaim.Spec.BucketClassName; cn != "" {
+			if cls, err := b.bucketClasses().Get(ctx, cn, metav1.GetOptions{}); err == nil {
+				lastBinderPolicy = cls.DeletionPolicy
+			}
+		}
+		empty, err := b.removeClaimRef(ctx, bucketName, bucketClaim.ObjectMeta.UID, lastBinderPolicy)
 		if err != nil {
 			klog.V(3).ErrorS(err, "Error updating bucket ref-set",
 				"bucket", bucketName, "bucketClaim", bucketClaim.ObjectMeta.Name)
@@ -185,10 +194,171 @@ func (b *BucketClaimListener) Delete(ctx context.Context, bucketClaim *v1alpha1.
 	return nil
 }
 
+// bindOutcome classifies how a claim's binding attempt went.
+type bindOutcome int
+
+const (
+	boundNew     bindOutcome = iota // bucket created by this claim
+	boundAdopted                    // bound to a pre-existing bucket
+	boundRefused                    // terminal refusal (event+condition recorded)
+)
+
+// bindResult is the outcome of bindOrCreateBucket.
+type bindResult struct {
+	outcome bindOutcome
+	// ready mirrors the bucket's provisioning state at bind time: adopting
+	// a Ready bucket makes the claim Ready synchronously.
+	ready bool
+	// alreadyBound: this claim was already among the binders (re-reconcile);
+	// suppress adoption events and preserve status.adopted.
+	alreadyBound bool
+}
+
+// bindOrCreateBucket implements create-or-adopt (lazedo sharing semantics):
+// create the Bucket when the name is free; otherwise adopt the existing one,
+// subject to the claim's requireNew/exclusive and the bucket's recorded
+// binding mode. All refusals are TERMINAL: event + Bound=False condition,
+// never a silent pending.
+func (b *BucketClaimListener) bindOrCreateBucket(ctx context.Context, inputClaim, claim *v1alpha1.BucketClaim, class *v1alpha1.BucketClass, bucketName string) (bindResult, error) {
+	existing, gerr := b.buckets().Get(ctx, bucketName, metav1.GetOptions{})
+	if kubeerrors.IsNotFound(gerr) {
+		bucket := &v1alpha1.Bucket{}
+		bucket.Name = bucketName
+		bucket.Spec.DriverName = class.DriverName
+		bucket.Status.BucketReady = false
+		bucket.Spec.BucketClassName = class.Name
+		bucket.Spec.DeletionPolicy = class.DeletionPolicy
+		bucket.Spec.Parameters = util.CopySS(class.Parameters)
+		if claim.Spec.RequireNew {
+			// Backend-level requireNew: the driver refuses adopting a
+			// bucket that already exists in the object store (returns
+			// AlreadyExists), which the sidecar surfaces terminally.
+			if bucket.Spec.Parameters == nil {
+				bucket.Spec.Parameters = map[string]string{}
+			}
+			bucket.Spec.Parameters[v1alpha1.RequireNewParameter] = "true"
+		}
+
+		bucket.Spec.BucketClaim = &v1.ObjectReference{
+			Name:      claim.ObjectMeta.Name,
+			Namespace: claim.ObjectMeta.Namespace,
+			UID:       claim.ObjectMeta.UID,
+		}
+
+		protocolCopy := make([]v1alpha1.Protocol, len(claim.Spec.Protocols))
+		copy(protocolCopy, claim.Spec.Protocols)
+		bucket.Spec.Protocols = protocolCopy
+
+		// Seed the binder set and mode AT CREATION — a separate annotate
+		// step raced the sidecar once before (stale-object wedge).
+		v1alpha1.SetBinderRefs(bucket, []v1alpha1.BinderRef{{
+			Namespace: claim.Namespace, Name: claim.Name, UID: string(claim.UID),
+		}})
+		v1alpha1.SetBindingMode(bucket, claim.Spec.Exclusive)
+
+		_, cerr := b.buckets().Create(ctx, bucket, metav1.CreateOptions{})
+		if cerr == nil {
+			return bindResult{outcome: boundNew}, nil
+		}
+		if !kubeerrors.IsAlreadyExists(cerr) {
+			klog.V(3).ErrorS(cerr, "Error creating bucket",
+				"bucket", bucketName, "bucketClaim", claim.ObjectMeta.Name)
+			return bindResult{}, b.recordError(inputClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, cerr)
+		}
+		// Lost a create race — fall through to adoption on a fresh copy.
+		if existing, gerr = b.buckets().Get(ctx, bucketName, metav1.GetOptions{}); gerr != nil {
+			return bindResult{}, b.recordError(inputClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, gerr)
+		}
+	} else if gerr != nil {
+		return bindResult{}, b.recordError(inputClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, gerr)
+	}
+
+	return b.adoptBucket(ctx, inputClaim, claim, class, existing)
+}
+
+// adoptBucket validates that the claim may bind to a pre-existing Bucket.
+func (b *BucketClaimListener) adoptBucket(ctx context.Context, inputClaim, claim *v1alpha1.BucketClaim, class *v1alpha1.BucketClass, bucket *v1alpha1.Bucket) (bindResult, error) {
+	res := bindResult{outcome: boundAdopted, ready: bucket.Status.BucketReady}
+
+	if v1alpha1.HasBinder(bucket, claim.UID) {
+		// Re-reconcile of a claim that already bound (creator or adopter).
+		res.alreadyBound = true
+		return res, nil
+	}
+
+	refs := v1alpha1.GetBinderRefs(bucket)
+
+	if claim.Spec.RequireNew {
+		b.refuseClaim(ctx, inputClaim, v1alpha1.RequireNewDenied,
+			fmt.Sprintf("bucket %q already exists and requireNew forbids adopting it", bucket.Name))
+		return bindResult{outcome: boundRefused}, nil
+	}
+	// Adoption never crosses backends: only within the same class, or classes
+	// resolving to the same connection.
+	if !sameRouting(class, bucket) {
+		b.refuseClaim(ctx, inputClaim, v1alpha1.ClassMismatch,
+			fmt.Sprintf("bucket %q belongs to class %q with a different connection; adoption never crosses backends",
+				bucket.Name, bucket.Spec.BucketClassName))
+		return bindResult{outcome: boundRefused}, nil
+	}
+	if len(refs) > 0 && v1alpha1.GetBindingMode(bucket) == v1alpha1.BindingModeExclusive {
+		b.refuseClaim(ctx, inputClaim, v1alpha1.ExclusivityDenied,
+			fmt.Sprintf("bucket %q is exclusively bound by its first claim", bucket.Name))
+		return bindResult{outcome: boundRefused}, nil
+	}
+	if claim.Spec.Exclusive && len(refs) > 0 {
+		b.refuseClaim(ctx, inputClaim, v1alpha1.ExclusivityDenied,
+			fmt.Sprintf("claim requires exclusive access but bucket %q already has %d binder(s)", bucket.Name, len(refs)))
+		return bindResult{outcome: boundRefused}, nil
+	}
+
+	return res, nil
+}
+
+// sameRouting reports whether adopting `bucket` from `class` stays on the
+// same backend: same class, or classes pointing at the same connection.
+func sameRouting(class *v1alpha1.BucketClass, bucket *v1alpha1.Bucket) bool {
+	if bucket.Spec.BucketClassName == class.Name {
+		return true
+	}
+	c := class.Parameters["connectionSecret"]
+	return c != "" && c == bucket.Spec.Parameters["connectionSecret"]
+}
+
+// refuseClaim records a TERMINAL provisioning refusal: warning Event plus a
+// readable Bound=False condition. Conflict-safe (fresh GET per attempt).
+func (b *BucketClaimListener) refuseClaim(ctx context.Context, claim *v1alpha1.BucketClaim, reason, message string) {
+	klog.V(1).InfoS("bucketClaim refused",
+		"name", claim.Name, "ns", claim.Namespace, "reason", reason, "message", message)
+	b.recordEvent(claim, v1.EventTypeWarning, reason, "%s", message)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest, gerr := b.bucketClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
+		if kubeerrors.IsNotFound(gerr) {
+			return nil
+		}
+		if gerr != nil {
+			return gerr
+		}
+		apimeta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionBound,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: latest.Generation,
+		})
+		_, uerr := b.bucketClaims(claim.Namespace).UpdateStatus(ctx, latest, metav1.UpdateOptions{})
+		return uerr
+	}); err != nil {
+		klog.V(3).ErrorS(err, "Failed to record refusal condition",
+			"bucketClaim", claim.Name, "ns", claim.Namespace)
+	}
+}
+
 // provisionBucketClaimOperation attempts to provision a bucket for a given bucketClaim.
 //
 // Return values
-//   - nil - BucketClaim successfully processed
+//   - nil - BucketClaim successfully processed (bound, or terminally refused
+//     with Event+condition)
 //   - ErrInvalidBucketClass - BucketClass does not exist          [requeue'd with exponential backoff]
 //   - ErrBucketAlreadyExists - BucketClaim already processed
 //   - non-nil err - Internal error                                [requeue'd with exponential backoff]
@@ -201,7 +371,12 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 	var bucketName string
 	var err error
 
+	statusAdopted := false
+	statusReady := false
+	adoptionEvent := false
+
 	if bucketClaim.Spec.ExistingBucketName != "" {
+		// Upstream-compatible explicit import/share path: unchanged.
 		bucketName = bucketClaim.Spec.ExistingBucketName
 		bucket, err := b.buckets().Get(ctx, bucketName, metav1.GetOptions{})
 		if kubeerrors.IsNotFound(err) {
@@ -229,8 +404,8 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 			return b.recordError(inputBucketClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
 		}
 
-		bucketClaim.Status.BucketName = bucketName
-		bucketClaim.Status.BucketReady = true
+		statusReady = true
+		statusAdopted = true
 	} else {
 		bucketClassName := bucketClaim.Spec.BucketClassName
 		if bucketClassName == "" {
@@ -253,47 +428,50 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 		// names in different subscriptions never collide.
 		bucketName = b.bucketNameFor(bucketClaim)
 
-		// create bucket
-		bucket := &v1alpha1.Bucket{}
-		bucket.Name = bucketName
-		bucket.Spec.DriverName = bucketClass.DriverName
-		bucket.Status.BucketReady = false
-		bucket.Spec.BucketClassName = bucketClassName
-		bucket.Spec.DeletionPolicy = bucketClass.DeletionPolicy
-		bucket.Spec.Parameters = util.CopySS(bucketClass.Parameters)
-
-		bucket.Spec.BucketClaim = &v1.ObjectReference{
-			Name:      bucketClaim.ObjectMeta.Name,
-			Namespace: bucketClaim.ObjectMeta.Namespace,
-			UID:       bucketClaim.ObjectMeta.UID,
+		res, err := b.bindOrCreateBucket(ctx, inputBucketClaim, bucketClaim, bucketClass, bucketName)
+		if err != nil {
+			return err
 		}
-
-		protocolCopy := make([]v1alpha1.Protocol, len(bucketClaim.Spec.Protocols))
-		copy(protocolCopy, bucketClaim.Spec.Protocols)
-
-		bucket.Spec.Protocols = protocolCopy
-		bucket, err = b.buckets().Create(ctx, bucket, metav1.CreateOptions{})
-		if err != nil && !kubeerrors.IsAlreadyExists(err) {
-			klog.V(3).ErrorS(err, "Error creationg bucket",
-				"bucket", bucketName,
-				"bucketClaim", bucketClaim.ObjectMeta.Name)
-			return b.recordError(inputBucketClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
+		if res.outcome == boundRefused {
+			// Terminal: Event + Bound=False condition already recorded.
+			// No BucketName, no finalizer — the claim never half-binds.
+			return nil
 		}
-
-		bucketClaim.Status.BucketName = bucketName
-		bucketClaim.Status.BucketReady = false
+		statusReady = res.ready
+		if res.alreadyBound {
+			statusAdopted = bucketClaim.Status.Adopted // preserve
+		} else {
+			statusAdopted = res.outcome == boundAdopted
+			adoptionEvent = statusAdopted
+		}
 	}
 
 	// lazedo: record this claim in the Bucket's ref-set so a shared bucket is
 	// only deleted when the last referencing claim goes away.
-	if err := b.addClaimRef(ctx, bucketName, bucketClaim.ObjectMeta.UID); err != nil {
+	binders, err := b.addClaimRef(ctx, bucketName, bucketClaim)
+	if err != nil {
 		return b.recordError(inputBucketClaim, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
+	}
+
+	// Close the adopt-while-provisioning race: if the bucket became Ready
+	// between our adoption check and the ref registration, the sidecar's
+	// flip loop may have run without our ref — re-read after registering.
+	if !statusReady {
+		if cur, gerr := b.buckets().Get(ctx, bucketName, metav1.GetOptions{}); gerr == nil {
+			statusReady = cur.Status.BucketReady
+		}
+	}
+
+	if adoptionEvent {
+		// Anti-footgun visibility: whoever did not mean to share, sees it.
+		b.recordEvent(inputBucketClaim, v1.EventTypeNormal, v1alpha1.AdoptedExistingBucket,
+			"bound to existing bucket %q, %d other binder(s)", bucketName, binders-1)
 	}
 
 	// Update status with retry logic for conflict errors
 	// Store the status values we want to set before entering retry loop
-	statusBucketName := bucketClaim.Status.BucketName
-	statusBucketReady := bucketClaim.Status.BucketReady
+	statusBucketName := bucketName
+	statusBucketReady := statusReady
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Fetch the latest version of the BucketClaim
@@ -309,6 +487,15 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 		// Apply the status changes to the latest version
 		latest.Status.BucketName = statusBucketName
 		latest.Status.BucketReady = statusBucketReady
+		latest.Status.Adopted = statusAdopted
+		latest.Status.Binders = int32(binders)
+		apimeta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionBound,
+			Status:             metav1.ConditionTrue,
+			Reason:             v1alpha1.ReasonBound,
+			Message:            fmt.Sprintf("bound to bucket %q (%d binder(s))", statusBucketName, binders),
+			ObservedGeneration: latest.Generation,
+		})
 
 		// Try to update the status
 		var updateErr error

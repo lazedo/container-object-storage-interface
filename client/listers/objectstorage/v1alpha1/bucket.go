@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,10 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/listers"
-	"k8s.io/client-go/tools/cache"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 )
 
 // BucketLister helps list Buckets.
@@ -30,19 +30,19 @@ import (
 type BucketLister interface {
 	// List lists all Buckets in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.Bucket, err error)
+	List(selector labels.Selector) (ret []*objectstoragev1alpha1.Bucket, err error)
 	// Get retrieves the Bucket from the index for a given name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1alpha1.Bucket, error)
+	Get(name string) (*objectstoragev1alpha1.Bucket, error)
 	BucketListerExpansion
 }
 
 // bucketLister implements the BucketLister interface.
 type bucketLister struct {
-	listers.ResourceIndexer[*v1alpha1.Bucket]
+	listers.ResourceIndexer[*objectstoragev1alpha1.Bucket]
 }
 
 // NewBucketLister returns a new BucketLister.
 func NewBucketLister(indexer cache.Indexer) BucketLister {
-	return &bucketLister{listers.New[*v1alpha1.Bucket](indexer, v1alpha1.Resource("bucket"))}
+	return &bucketLister{listers.New[*objectstoragev1alpha1.Bucket](indexer, objectstoragev1alpha1.Resource("bucket"))}
 }

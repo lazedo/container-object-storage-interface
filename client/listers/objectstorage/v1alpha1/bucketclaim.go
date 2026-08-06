@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,10 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/listers"
-	"k8s.io/client-go/tools/cache"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 )
 
 // BucketClaimLister helps list BucketClaims.
@@ -30,7 +30,7 @@ import (
 type BucketClaimLister interface {
 	// List lists all BucketClaims in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.BucketClaim, err error)
+	List(selector labels.Selector) (ret []*objectstoragev1alpha1.BucketClaim, err error)
 	// BucketClaims returns an object that can list and get BucketClaims.
 	BucketClaims(namespace string) BucketClaimNamespaceLister
 	BucketClaimListerExpansion
@@ -38,17 +38,17 @@ type BucketClaimLister interface {
 
 // bucketClaimLister implements the BucketClaimLister interface.
 type bucketClaimLister struct {
-	listers.ResourceIndexer[*v1alpha1.BucketClaim]
+	listers.ResourceIndexer[*objectstoragev1alpha1.BucketClaim]
 }
 
 // NewBucketClaimLister returns a new BucketClaimLister.
 func NewBucketClaimLister(indexer cache.Indexer) BucketClaimLister {
-	return &bucketClaimLister{listers.New[*v1alpha1.BucketClaim](indexer, v1alpha1.Resource("bucketclaim"))}
+	return &bucketClaimLister{listers.New[*objectstoragev1alpha1.BucketClaim](indexer, objectstoragev1alpha1.Resource("bucketclaim"))}
 }
 
 // BucketClaims returns an object that can list and get BucketClaims.
 func (s *bucketClaimLister) BucketClaims(namespace string) BucketClaimNamespaceLister {
-	return bucketClaimNamespaceLister{listers.NewNamespaced[*v1alpha1.BucketClaim](s.ResourceIndexer, namespace)}
+	return bucketClaimNamespaceLister{listers.NewNamespaced[*objectstoragev1alpha1.BucketClaim](s.ResourceIndexer, namespace)}
 }
 
 // BucketClaimNamespaceLister helps list and get BucketClaims.
@@ -56,15 +56,15 @@ func (s *bucketClaimLister) BucketClaims(namespace string) BucketClaimNamespaceL
 type BucketClaimNamespaceLister interface {
 	// List lists all BucketClaims in the indexer for a given namespace.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.BucketClaim, err error)
+	List(selector labels.Selector) (ret []*objectstoragev1alpha1.BucketClaim, err error)
 	// Get retrieves the BucketClaim from the indexer for a given namespace and name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1alpha1.BucketClaim, error)
+	Get(name string) (*objectstoragev1alpha1.BucketClaim, error)
 	BucketClaimNamespaceListerExpansion
 }
 
 // bucketClaimNamespaceLister implements the BucketClaimNamespaceLister
 // interface.
 type bucketClaimNamespaceLister struct {
-	listers.ResourceIndexer[*v1alpha1.BucketClaim]
+	listers.ResourceIndexer[*objectstoragev1alpha1.BucketClaim]
 }

@@ -430,8 +430,9 @@ func TestRetryOnConflictStatusUpdate(t *testing.T) {
 		t.Fatalf("Error occurred when reading BucketClaim: %v", err)
 	}
 
-	// Verify status was updated
-	expectedBucketName := fmt.Sprintf("bucket-%s", bucketClaim.UID)
+	// Verify status was updated. lazedo naming: the Bucket (and object-store
+	// bucket) is named after the claim, not bucket-<uid>.
+	expectedBucketName := bucketClaim.Name
 	if updatedClaim.Status.BucketName != expectedBucketName {
 		t.Errorf("Expected BucketName %s, got %s", expectedBucketName, updatedClaim.Status.BucketName)
 	}

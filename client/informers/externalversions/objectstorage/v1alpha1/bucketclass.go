@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,24 +19,24 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
-	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	apisobjectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 	versioned "sigs.k8s.io/container-object-storage-interface/client/clientset/versioned"
 	internalinterfaces "sigs.k8s.io/container-object-storage-interface/client/informers/externalversions/internalinterfaces"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/listers/objectstorage/v1alpha1"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/listers/objectstorage/v1alpha1"
 )
 
 // BucketClassInformer provides access to a shared informer and lister for
 // BucketClasses.
 type BucketClassInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1alpha1.BucketClassLister
+	Lister() objectstoragev1alpha1.BucketClassLister
 }
 
 type bucketClassInformer struct {
@@ -70,7 +70,7 @@ func NewFilteredBucketClassInformer(client versioned.Interface, resyncPeriod tim
 				return client.ObjectstorageV1alpha1().BucketClasses().Watch(context.TODO(), options)
 			},
 		},
-		&objectstoragev1alpha1.BucketClass{},
+		&apisobjectstoragev1alpha1.BucketClass{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +81,9 @@ func (f *bucketClassInformer) defaultInformer(client versioned.Interface, resync
 }
 
 func (f *bucketClassInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&objectstoragev1alpha1.BucketClass{}, f.defaultInformer)
+	return f.factory.InformerFor(&apisobjectstoragev1alpha1.BucketClass{}, f.defaultInformer)
 }
 
-func (f *bucketClassInformer) Lister() v1alpha1.BucketClassLister {
-	return v1alpha1.NewBucketClassLister(f.Informer().GetIndexer())
+func (f *bucketClassInformer) Lister() objectstoragev1alpha1.BucketClassLister {
+	return objectstoragev1alpha1.NewBucketClassLister(f.Informer().GetIndexer())
 }

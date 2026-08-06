@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,24 +19,24 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
-	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	apisobjectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 	versioned "sigs.k8s.io/container-object-storage-interface/client/clientset/versioned"
 	internalinterfaces "sigs.k8s.io/container-object-storage-interface/client/informers/externalversions/internalinterfaces"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/listers/objectstorage/v1alpha1"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/listers/objectstorage/v1alpha1"
 )
 
 // BucketAccessInformer provides access to a shared informer and lister for
 // BucketAccesses.
 type BucketAccessInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1alpha1.BucketAccessLister
+	Lister() objectstoragev1alpha1.BucketAccessLister
 }
 
 type bucketAccessInformer struct {
@@ -71,7 +71,7 @@ func NewFilteredBucketAccessInformer(client versioned.Interface, namespace strin
 				return client.ObjectstorageV1alpha1().BucketAccesses(namespace).Watch(context.TODO(), options)
 			},
 		},
-		&objectstoragev1alpha1.BucketAccess{},
+		&apisobjectstoragev1alpha1.BucketAccess{},
 		resyncPeriod,
 		indexers,
 	)
@@ -82,9 +82,9 @@ func (f *bucketAccessInformer) defaultInformer(client versioned.Interface, resyn
 }
 
 func (f *bucketAccessInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&objectstoragev1alpha1.BucketAccess{}, f.defaultInformer)
+	return f.factory.InformerFor(&apisobjectstoragev1alpha1.BucketAccess{}, f.defaultInformer)
 }
 
-func (f *bucketAccessInformer) Lister() v1alpha1.BucketAccessLister {
-	return v1alpha1.NewBucketAccessLister(f.Informer().GetIndexer())
+func (f *bucketAccessInformer) Lister() objectstoragev1alpha1.BucketAccessLister {
+	return objectstoragev1alpha1.NewBucketAccessLister(f.Informer().GetIndexer())
 }

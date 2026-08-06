@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,13 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	context "context"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	gentype "k8s.io/client-go/gentype"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 	scheme "sigs.k8s.io/container-object-storage-interface/client/clientset/versioned/scheme"
 )
 
@@ -37,33 +37,34 @@ type BucketAccessesGetter interface {
 
 // BucketAccessInterface has methods to work with BucketAccess resources.
 type BucketAccessInterface interface {
-	Create(ctx context.Context, bucketAccess *v1alpha1.BucketAccess, opts v1.CreateOptions) (*v1alpha1.BucketAccess, error)
-	Update(ctx context.Context, bucketAccess *v1alpha1.BucketAccess, opts v1.UpdateOptions) (*v1alpha1.BucketAccess, error)
+	Create(ctx context.Context, bucketAccess *objectstoragev1alpha1.BucketAccess, opts v1.CreateOptions) (*objectstoragev1alpha1.BucketAccess, error)
+	Update(ctx context.Context, bucketAccess *objectstoragev1alpha1.BucketAccess, opts v1.UpdateOptions) (*objectstoragev1alpha1.BucketAccess, error)
 	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-	UpdateStatus(ctx context.Context, bucketAccess *v1alpha1.BucketAccess, opts v1.UpdateOptions) (*v1alpha1.BucketAccess, error)
+	UpdateStatus(ctx context.Context, bucketAccess *objectstoragev1alpha1.BucketAccess, opts v1.UpdateOptions) (*objectstoragev1alpha1.BucketAccess, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
-	Get(ctx context.Context, name string, opts v1.GetOptions) (*v1alpha1.BucketAccess, error)
-	List(ctx context.Context, opts v1.ListOptions) (*v1alpha1.BucketAccessList, error)
+	Get(ctx context.Context, name string, opts v1.GetOptions) (*objectstoragev1alpha1.BucketAccess, error)
+	List(ctx context.Context, opts v1.ListOptions) (*objectstoragev1alpha1.BucketAccessList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
-	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.BucketAccess, err error)
+	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *objectstoragev1alpha1.BucketAccess, err error)
 	BucketAccessExpansion
 }
 
 // bucketAccesses implements BucketAccessInterface
 type bucketAccesses struct {
-	*gentype.ClientWithList[*v1alpha1.BucketAccess, *v1alpha1.BucketAccessList]
+	*gentype.ClientWithList[*objectstoragev1alpha1.BucketAccess, *objectstoragev1alpha1.BucketAccessList]
 }
 
 // newBucketAccesses returns a BucketAccesses
 func newBucketAccesses(c *ObjectstorageV1alpha1Client, namespace string) *bucketAccesses {
 	return &bucketAccesses{
-		gentype.NewClientWithList[*v1alpha1.BucketAccess, *v1alpha1.BucketAccessList](
+		gentype.NewClientWithList[*objectstoragev1alpha1.BucketAccess, *objectstoragev1alpha1.BucketAccessList](
 			"bucketaccesses",
 			c.RESTClient(),
 			scheme.ParameterCodec,
 			namespace,
-			func() *v1alpha1.BucketAccess { return &v1alpha1.BucketAccess{} },
-			func() *v1alpha1.BucketAccessList { return &v1alpha1.BucketAccessList{} }),
+			func() *objectstoragev1alpha1.BucketAccess { return &objectstoragev1alpha1.BucketAccess{} },
+			func() *objectstoragev1alpha1.BucketAccessList { return &objectstoragev1alpha1.BucketAccessList{} },
+		),
 	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,10 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/listers"
-	"k8s.io/client-go/tools/cache"
-	v1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
+	objectstoragev1alpha1 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
 )
 
 // BucketAccessClassLister helps list BucketAccessClasses.
@@ -30,19 +30,19 @@ import (
 type BucketAccessClassLister interface {
 	// List lists all BucketAccessClasses in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.BucketAccessClass, err error)
+	List(selector labels.Selector) (ret []*objectstoragev1alpha1.BucketAccessClass, err error)
 	// Get retrieves the BucketAccessClass from the index for a given name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1alpha1.BucketAccessClass, error)
+	Get(name string) (*objectstoragev1alpha1.BucketAccessClass, error)
 	BucketAccessClassListerExpansion
 }
 
 // bucketAccessClassLister implements the BucketAccessClassLister interface.
 type bucketAccessClassLister struct {
-	listers.ResourceIndexer[*v1alpha1.BucketAccessClass]
+	listers.ResourceIndexer[*objectstoragev1alpha1.BucketAccessClass]
 }
 
 // NewBucketAccessClassLister returns a new BucketAccessClassLister.
 func NewBucketAccessClassLister(indexer cache.Indexer) BucketAccessClassLister {
-	return &bucketAccessClassLister{listers.New[*v1alpha1.BucketAccessClass](indexer, v1alpha1.Resource("bucketaccessclass"))}
+	return &bucketAccessClassLister{listers.New[*objectstoragev1alpha1.BucketAccessClass](indexer, objectstoragev1alpha1.Resource("bucketaccessclass"))}
 }

@@ -204,7 +204,11 @@ func (c *ObjectStorageController) Run(ctx context.Context) error {
 		return fmt.Errorf("error getting the default leader identity: %v", err)
 	}
 
-	c.eventBroadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: c.kubeClient.CoreV1().Events(ns)})
+	// lazedo: do NOT re-register a namespaced sink here — the constructor
+	// already records to Events(""), which writes each event into its
+	// object's own namespace. A second sink pinned to the pod namespace made
+	// every cross-namespace event PATCH fail noisily ("can't patch an event
+	// with namespace 'x' in namespace 'y'").
 	defer c.eventBroadcaster.Shutdown()
 
 	rlConfig := resourcelock.ResourceLockConfig{

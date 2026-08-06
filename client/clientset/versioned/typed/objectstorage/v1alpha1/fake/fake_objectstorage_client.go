@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,23 +29,23 @@ type FakeObjectstorageV1alpha1 struct {
 }
 
 func (c *FakeObjectstorageV1alpha1) Buckets() v1alpha1.BucketInterface {
-	return &FakeBuckets{c}
+	return newFakeBuckets(c)
 }
 
 func (c *FakeObjectstorageV1alpha1) BucketAccesses(namespace string) v1alpha1.BucketAccessInterface {
-	return &FakeBucketAccesses{c, namespace}
+	return newFakeBucketAccesses(c, namespace)
 }
 
 func (c *FakeObjectstorageV1alpha1) BucketAccessClasses() v1alpha1.BucketAccessClassInterface {
-	return &FakeBucketAccessClasses{c}
+	return newFakeBucketAccessClasses(c)
 }
 
 func (c *FakeObjectstorageV1alpha1) BucketClaims(namespace string) v1alpha1.BucketClaimInterface {
-	return &FakeBucketClaims{c, namespace}
+	return newFakeBucketClaims(c, namespace)
 }
 
 func (c *FakeObjectstorageV1alpha1) BucketClasses() v1alpha1.BucketClassInterface {
-	return &FakeBucketClasses{c}
+	return newFakeBucketClasses(c)
 }
 
 // RESTClient returns a RESTClient that is used to communicate
