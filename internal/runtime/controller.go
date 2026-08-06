@@ -286,13 +286,12 @@ func (c *ObjectStorageController) processNextItem(ctx context.Context) bool {
 		delete := *o.DeleteFunc
 		err = delete(ctx, o.Object)
 		o.Indexer.Delete(o.Object)
-		c.opMap.Delete(uuid)
 	default:
 		panic("unknown item in queue")
 	}
 
 	// Handle the error if something went wrong
-	c.handleErr(err, uuid)
+	c.handleErr(err, uuid, op)
 	return true
 }
 
@@ -320,9 +319,18 @@ func (c *ObjectStorageController) GetOpLock(op types.UID) *sync.Mutex {
 }
 
 // handleErr checks if an error happened and makes sure we will retry later.
-func (c *ObjectStorageController) handleErr(err error, uuid types.UID) {
+//
+// lazedo: on success, only delete the opMap entry if it is STILL the op we
+// just processed. An event that lands while its predecessor is being handled
+// overwrites the single opMap slot; unconditionally deleting here destroyed
+// that newer op, and the workqueue's dirty-redelivery then found nothing —
+// the event (e.g. a claim's deletion) was lost forever, unrecoverable even
+// by resync (DeltaFIFO resyncs from the indexer, which never saw it). Seen
+// live as a BucketClaim wedged with deletionTimestamp+finalizer and no
+// handler ever running.
+func (c *ObjectStorageController) handleErr(err error, uuid types.UID, op interface{}) {
 	if err == nil {
-		c.opMap.Delete(uuid)
+		c.opMap.CompareAndDelete(uuid, op)
 		return
 	}
 	c.queue.AddRateLimited(uuid)
@@ -353,8 +361,11 @@ func (c *ObjectStorageController) runController(ctx context.Context) {
 								panic(err)
 							}
 
+							// lazedo: skip only THIS no-op delta —
+							// returning dropped every remaining delta
+							// in the batch.
 							if reflect.DeepEqual(d.Object, old) {
-								return nil
+								continue
 							}
 
 							uuid := d.Object.(metav1.Object).GetUID()
