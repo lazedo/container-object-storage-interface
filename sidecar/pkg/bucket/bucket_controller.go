@@ -148,7 +148,7 @@ func (b *BucketListener) Add(ctx context.Context, inputBucket *v1alpha1.Bucket) 
 			// That refusal is TERMINAL — surface it (Event + Bound=False
 			// condition on the claim) instead of retry-looping forever.
 			if status.Code(err) == codes.AlreadyExists {
-				return b.refuseRequireNew(ctx, bucket)
+				return b.refuseRequireNew(ctx, bucket, err)
 			}
 			return b.recordError(inputBucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, fmt.Errorf("failed to create bucket: %w", err))
 		}
@@ -232,33 +232,37 @@ func (b *BucketListener) Add(ctx context.Context, inputBucket *v1alpha1.Bucket) 
 }
 
 // refuseRequireNew surfaces the driver's AlreadyExists refusal (requireNew
-// semantics) terminally: warning Events on the Bucket and creating claim plus
-// a readable Bound=False condition on the claim. Returns nil so the workqueue
-// does not spin — periodic resyncs re-evaluate idempotently.
-func (b *BucketListener) refuseRequireNew(ctx context.Context, bucket *v1alpha1.Bucket) error {
+// semantics): warning Events on the Bucket and creating claim plus a readable
+// Bound=False condition on the claim. Returns an error so the workqueue
+// requeues with backoff — the central controller's own bind-time status write
+// can land AFTER this refusal and clobber the condition (fast local drivers
+// lose that race), and DeltaFIFO resyncs never re-emit an unchanged bucket,
+// so a one-shot write could be silently overwritten. The backoff retry
+// re-asserts the condition until it sticks (and recovers for real if the
+// backend bucket disappears meanwhile).
+func (b *BucketListener) refuseRequireNew(ctx context.Context, bucket *v1alpha1.Bucket, cause error) error {
 	msg := fmt.Sprintf("backend bucket %q already exists and requireNew forbids adopting it", bucket.Name)
 	klog.V(1).InfoS("bucket refused by driver (requireNew)", "bucket", bucket.Name)
 	b.recordEvent(bucket, v1.EventTypeWarning, v1alpha1.RequireNewDenied, "%s", msg)
 	ref := bucket.Spec.BucketClaim
-	if ref == nil {
-		return nil
+	if ref != nil {
+		if err := b.updateClaimStatusWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
+			apimeta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionBound,
+				Status:             metav1.ConditionFalse,
+				Reason:             v1alpha1.RequireNewDenied,
+				Message:            msg,
+				ObservedGeneration: cur.Generation,
+			})
+		}); err != nil && !kubeerrors.IsNotFound(err) {
+			klog.V(3).ErrorS(err, "Failed to record requireNew refusal on claim",
+				"bucketClaim", ref.Name, "ns", ref.Namespace)
+		}
+		if claim, err := b.bucketClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{}); err == nil {
+			b.recordEvent(claim, v1.EventTypeWarning, v1alpha1.RequireNewDenied, "%s", msg)
+		}
 	}
-	if err := b.updateClaimStatusWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
-		apimeta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionBound,
-			Status:             metav1.ConditionFalse,
-			Reason:             v1alpha1.RequireNewDenied,
-			Message:            msg,
-			ObservedGeneration: cur.Generation,
-		})
-	}); err != nil && !kubeerrors.IsNotFound(err) {
-		klog.V(3).ErrorS(err, "Failed to record requireNew refusal on claim",
-			"bucketClaim", ref.Name, "ns", ref.Namespace)
-	}
-	if claim, err := b.bucketClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{}); err == nil {
-		b.recordEvent(claim, v1.EventTypeWarning, v1alpha1.RequireNewDenied, "%s", msg)
-	}
-	return nil
+	return fmt.Errorf("requireNew refused for bucket %q: %w", bucket.Name, cause)
 }
 
 // Update attempts to reconcile changes to a given bucket. This function must be idempotent
