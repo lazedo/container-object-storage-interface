@@ -31,6 +31,7 @@ import (
 	kube "k8s.io/client-go/kubernetes"
 	kubecorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	cosiapi "sigs.k8s.io/container-object-storage-interface/client/apis"
 	"sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/consts"
@@ -283,29 +284,32 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 		}
 	}
 
-	if controllerutil.AddFinalizer(bucket, consts.BABucketFinalizer) {
-		_, err = bal.buckets().Update(ctx, bucket, metav1.UpdateOptions{})
-		if err != nil {
+	if !controllerutil.ContainsFinalizer(bucket, consts.BABucketFinalizer) {
+		// lazedo: conflict-safe -- see updateBucketWithRetry.
+		if _, err = bal.updateBucketWithRetry(ctx, bucket.ObjectMeta.Name, func(cur *v1alpha1.Bucket) {
+			controllerutil.AddFinalizer(cur, consts.BABucketFinalizer)
+		}); err != nil {
 			return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess, err)
 		}
 	}
 
-	if controllerutil.AddFinalizer(bucketAccess, consts.BAFinalizer) {
-		bucketAccess, err = bal.bucketAccesses(bucketAccess.ObjectMeta.Namespace).Update(ctx, bucketAccess, metav1.UpdateOptions{})
-		if err != nil {
+	if !controllerutil.ContainsFinalizer(bucketAccess, consts.BAFinalizer) {
+		if bucketAccess, err = bal.updateBucketAccessWithRetry(ctx, bucketAccess.ObjectMeta.Namespace, bucketAccess.ObjectMeta.Name, func(cur *v1alpha1.BucketAccess) {
+			controllerutil.AddFinalizer(cur, consts.BAFinalizer)
+		}); err != nil {
 			klog.V(3).ErrorS(err, "Failed to update BucketAccess finalizer",
-				"bucketAccess", bucketAccess.ObjectMeta.Name,
+				"bucketAccess", inputBucketAccess.ObjectMeta.Name,
 				"bucket", bucket.ObjectMeta.Name)
 			return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
-				fmt.Errorf("failed to update finalizer on BucketAccess %s: %w", bucketAccess.ObjectMeta.Name, err))
+				fmt.Errorf("failed to update finalizer on BucketAccess %s: %w", inputBucketAccess.ObjectMeta.Name, err))
 		}
 	}
 
-	bucketAccess.Status.AccountID = rsp.AccountId
-	bucketAccess.Status.AccessGranted = true
-
 	// if this step fails, then controller will retry with backoff
-	if _, err := bal.bucketAccesses(bucketAccess.ObjectMeta.Namespace).UpdateStatus(ctx, bucketAccess, metav1.UpdateOptions{}); err != nil {
+	if _, err := bal.updateBucketAccessStatusWithRetry(ctx, bucketAccess.ObjectMeta.Namespace, bucketAccess.ObjectMeta.Name, func(cur *v1alpha1.BucketAccess) {
+		cur.Status.AccountID = rsp.AccountId
+		cur.Status.AccessGranted = true
+	}); err != nil {
 		klog.V(3).ErrorS(err, "Failed to update BucketAccess Status",
 			"bucketAccess", bucketAccess.ObjectMeta.Name,
 			"bucket", bucket.ObjectMeta.Name)
@@ -385,8 +389,16 @@ func (bal *BucketAccessListener) deleteBucketAccessOp(ctx context.Context, bucke
 		return err
 	}
 
-	if controllerutil.RemoveFinalizer(secret, consts.SecretFinalizer) {
-		_, err = bal.secrets(secret.ObjectMeta.Namespace).Update(ctx, secret, metav1.UpdateOptions{})
+	if controllerutil.ContainsFinalizer(secret, consts.SecretFinalizer) {
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur, err := bal.secrets(secret.ObjectMeta.Namespace).Get(ctx, secret.ObjectMeta.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			controllerutil.RemoveFinalizer(cur, consts.SecretFinalizer)
+			_, err = bal.secrets(cur.ObjectMeta.Namespace).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		})
 		if err != nil {
 			klog.V(3).ErrorS(err, "Error removing finalizer from secret",
 				"secret", secret.ObjectMeta.Name,
@@ -406,8 +418,10 @@ func (bal *BucketAccessListener) deleteBucketAccessOp(ctx context.Context, bucke
 		return nil
 	}
 
-	if controllerutil.RemoveFinalizer(bucketAccess, consts.BAFinalizer) {
-		_, err = bal.bucketAccesses(bucketAccess.ObjectMeta.Namespace).Update(ctx, bucketAccess, metav1.UpdateOptions{})
+	if controllerutil.ContainsFinalizer(bucketAccess, consts.BAFinalizer) {
+		_, err = bal.updateBucketAccessWithRetry(ctx, bucketAccess.ObjectMeta.Namespace, bucketAccess.ObjectMeta.Name, func(cur *v1alpha1.BucketAccess) {
+			controllerutil.RemoveFinalizer(cur, consts.BAFinalizer)
+		})
 		if err != nil {
 			klog.V(3).ErrorS(err, "Error removing finalizer from bucketAccess",
 				"bucketAccess", bucketAccess.ObjectMeta.Name)
@@ -418,6 +432,51 @@ func (bal *BucketAccessListener) deleteBucketAccessOp(ctx context.Context, bucke
 	}
 
 	return nil
+}
+
+// lazedo: conflict-safe writers -- every attempt re-GETs and re-applies the
+// mutation, so concurrent writers cannot wedge the reconcile with a stale
+// copy (same failure family as the bucket controller's finalizer wedge).
+func (bal *BucketAccessListener) updateBucketWithRetry(ctx context.Context, name string, mutate func(*v1alpha1.Bucket)) (*v1alpha1.Bucket, error) {
+	var out *v1alpha1.Bucket
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := bal.buckets().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		out, err = bal.buckets().Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+	return out, err
+}
+
+func (bal *BucketAccessListener) updateBucketAccessWithRetry(ctx context.Context, ns, name string, mutate func(*v1alpha1.BucketAccess)) (*v1alpha1.BucketAccess, error) {
+	var out *v1alpha1.BucketAccess
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := bal.bucketAccesses(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		out, err = bal.bucketAccesses(ns).Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+	return out, err
+}
+
+func (bal *BucketAccessListener) updateBucketAccessStatusWithRetry(ctx context.Context, ns, name string, mutate func(*v1alpha1.BucketAccess)) (*v1alpha1.BucketAccess, error) {
+	var out *v1alpha1.BucketAccess
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := bal.bucketAccesses(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		out, err = bal.bucketAccesses(ns).UpdateStatus(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+	return out, err
 }
 
 func (bal *BucketAccessListener) secrets(ns string) kubecorev1.SecretInterface {

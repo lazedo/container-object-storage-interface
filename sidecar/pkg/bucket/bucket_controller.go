@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/consts"
 	"sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha1"
@@ -165,41 +166,39 @@ func (b *BucketListener) Add(ctx context.Context, inputBucket *v1alpha1.Bucket) 
 		// Now we update the BucketReady status of BucketClaim
 		if bucket.Spec.BucketClaim != nil {
 			ref := bucket.Spec.BucketClaim
-			bucketClaim, err := b.bucketClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-			if err != nil {
-				klog.V(3).ErrorS(err, "Failed to get bucketClaim",
-					"bucketClaim", ref.Name,
-					"bucket", bucket.ObjectMeta.Name)
-				return b.recordError(bucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
-			}
-
-			bucketClaim.Status.BucketReady = true
-			if _, err = b.bucketClaims(bucketClaim.Namespace).UpdateStatus(ctx, bucketClaim, metav1.UpdateOptions{}); err != nil {
+			if err := b.updateClaimStatusWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
+				cur.Status.BucketReady = true
+			}); err != nil {
 				klog.V(3).ErrorS(err, "Failed to update bucketClaim",
 					"bucketClaim", ref.Name,
 					"bucket", bucket.ObjectMeta.Name)
 				return b.recordError(bucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket, err)
 			}
 
-			klog.V(5).Infof("Successfully updated status of bucketClaim: %s, bucket: %s", bucketClaim.ObjectMeta.Name, bucket.ObjectMeta.Name)
+			klog.V(5).Infof("Successfully updated status of bucketClaim: %s, bucket: %s", ref.Name, bucket.ObjectMeta.Name)
 		}
 	}
 
-	controllerutil.AddFinalizer(bucket, consts.BucketFinalizer)
-	if bucket, err = b.buckets().Update(ctx, bucket, metav1.UpdateOptions{}); err != nil {
-		klog.V(3).ErrorS(err, "Failed to update bucket finalizers", "bucket", bucket.ObjectMeta.Name)
-		return b.recordError(bucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket,
+	// lazedo: the central controller annotates the Bucket (claim refcount)
+	// right after creation, so an Update built on the event copy hits a
+	// Conflict and the workqueue retries with the SAME stale object -- seen
+	// live wedging the first claim of a fresh install forever. Re-GET and
+	// re-apply the mutation on every attempt instead.
+	if bucket, err = b.updateBucketWithRetry(ctx, bucket.ObjectMeta.Name, func(cur *v1alpha1.Bucket) {
+		controllerutil.AddFinalizer(cur, consts.BucketFinalizer)
+	}); err != nil {
+		klog.V(3).ErrorS(err, "Failed to update bucket finalizers", "bucket", inputBucket.ObjectMeta.Name)
+		return b.recordError(inputBucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket,
 			fmt.Errorf("failed to update bucket finalizers: %w", err))
 	}
 
 	klog.V(5).Infof("Successfully added finalizer to bucket: %s", bucket.ObjectMeta.Name)
 
-	// Setting the status here so that the updated object is used
-	bucket.Status.BucketReady = bucketReady
-	bucket.Status.BucketID = bucketID
-
 	// if this step fails, then controller will retry with backoff
-	if _, err = b.buckets().UpdateStatus(ctx, bucket, metav1.UpdateOptions{}); err != nil {
+	if _, err = b.updateBucketStatusWithRetry(ctx, bucket.ObjectMeta.Name, func(cur *v1alpha1.Bucket) {
+		cur.Status.BucketReady = bucketReady
+		cur.Status.BucketID = bucketID
+	}); err != nil {
 		klog.V(3).ErrorS(err, "Failed to update bucket status",
 			"bucket", bucket.ObjectMeta.Name)
 		return b.recordError(bucket, v1.EventTypeWarning, v1alpha1.FailedCreateBucket,
@@ -275,7 +274,16 @@ func (b *BucketListener) handleDeletion(ctx context.Context, bucket *v1alpha1.Bu
 		controllerutil.RemoveFinalizer(bucket, consts.BucketFinalizer)
 	}
 
-	if _, err = b.buckets().Update(ctx, bucket, metav1.UpdateOptions{}); err != nil {
+	// Mirror the removals decided above onto a FRESH copy -- writing the
+	// event copy back loses concurrent writes and conflicts forever.
+	if _, err = b.updateBucketWithRetry(ctx, bucket.ObjectMeta.Name, func(cur *v1alpha1.Bucket) {
+		if !controllerutil.ContainsFinalizer(bucket, consts.BABucketFinalizer) {
+			controllerutil.RemoveFinalizer(cur, consts.BABucketFinalizer)
+		}
+		if !controllerutil.ContainsFinalizer(bucket, consts.BucketFinalizer) {
+			controllerutil.RemoveFinalizer(cur, consts.BucketFinalizer)
+		}
+	}); err != nil {
 		klog.V(3).ErrorS(err, "Error updating bucket after removing finalizers",
 			"bucket", bucket.ObjectMeta.Name)
 		return err
@@ -299,22 +307,13 @@ func (b *BucketListener) Delete(ctx context.Context, inputBucket *v1alpha1.Bucke
 		ref := inputBucket.Spec.BucketClaim
 		klog.V(3).Infof("Removing finalizer of bucketClaim: %s before deleting bucket: %s", ref.Name, inputBucket.ObjectMeta.Name)
 
-		bucketClaim, err := b.bucketClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-		if err != nil {
-			klog.V(3).ErrorS(err, "Error getting bucketClaim for removing finalizer",
+		if err := b.updateClaimWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
+			controllerutil.RemoveFinalizer(cur, consts.BCFinalizer)
+		}); err != nil {
+			klog.V(3).ErrorS(err, "Error removing bucketClaim finalizer",
 				"bucket", inputBucket.ObjectMeta.Name,
 				"bucketClaim", ref.Name)
 			return err
-		}
-
-		if controllerutil.RemoveFinalizer(bucketClaim, consts.BCFinalizer) {
-			_, err := b.bucketClaims(bucketClaim.ObjectMeta.Namespace).Update(ctx, bucketClaim, metav1.UpdateOptions{})
-			if err != nil {
-				klog.V(3).ErrorS(err, "Error removing bucketClaim finalizer",
-					"bucket", inputBucket.ObjectMeta.Name,
-					"bucketClaim", bucketClaim.ObjectMeta.Name)
-				return err
-			}
 		}
 	}
 
@@ -364,27 +363,75 @@ func (b *BucketListener) deleteBucketOp(ctx context.Context, bucket *v1alpha1.Bu
 
 	if bucket.Spec.BucketClaim != nil {
 		ref := bucket.Spec.BucketClaim
-		bucketClaim, err := b.bucketClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-		if err != nil {
-			klog.V(3).ErrorS(err, "Error fetching bucketClaim",
+		if err := b.updateClaimWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
+			controllerutil.RemoveFinalizer(cur, consts.BCFinalizer)
+		}); err != nil {
+			klog.V(3).ErrorS(err, "Error removing finalizer from bucketClaim",
 				"bucketClaim", ref.Name,
 				"bucket", bucket.ObjectMeta.Name)
 			return err
 		}
 
-		if controllerutil.RemoveFinalizer(bucketClaim, consts.BCFinalizer) {
-			if _, err := b.bucketClaims(bucketClaim.ObjectMeta.Namespace).Update(ctx, bucketClaim, metav1.UpdateOptions{}); err != nil {
-				klog.V(3).ErrorS(err, "Error removing finalizer from bucketClaim",
-					"bucketClaim", bucketClaim.ObjectMeta.Name,
-					"bucket", bucket.ObjectMeta.Name)
-				return err
-			}
-		}
-
-		klog.V(5).Infof("Successfully removed finalizer: %s from bucketClaim: %s for bucket: %s", consts.BCFinalizer, bucketClaim.ObjectMeta.Name, bucket.ObjectMeta.Name)
+		klog.V(5).Infof("Successfully removed finalizer: %s from bucketClaim: %s for bucket: %s", consts.BCFinalizer, ref.Name, bucket.ObjectMeta.Name)
 	}
 
 	return nil
+}
+
+// lazedo: conflict-safe writers. Each attempt re-GETs the object and
+// re-applies the mutation, so a concurrent writer (the controller's claim
+// refcount annotation, another sidecar path) can never wedge a reconcile
+// with a perpetually stale copy.
+func (b *BucketListener) updateBucketWithRetry(ctx context.Context, name string, mutate func(*v1alpha1.Bucket)) (*v1alpha1.Bucket, error) {
+	var out *v1alpha1.Bucket
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := b.buckets().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		out, err = b.buckets().Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+	return out, err
+}
+
+func (b *BucketListener) updateBucketStatusWithRetry(ctx context.Context, name string, mutate func(*v1alpha1.Bucket)) (*v1alpha1.Bucket, error) {
+	var out *v1alpha1.Bucket
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := b.buckets().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		out, err = b.buckets().UpdateStatus(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+	return out, err
+}
+
+func (b *BucketListener) updateClaimWithRetry(ctx context.Context, ns, name string, mutate func(*v1alpha1.BucketClaim)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := b.bucketClaims(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		_, err = b.bucketClaims(ns).Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func (b *BucketListener) updateClaimStatusWithRetry(ctx context.Context, ns, name string, mutate func(*v1alpha1.BucketClaim)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := b.bucketClaims(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(cur)
+		_, err = b.bucketClaims(ns).UpdateStatus(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (b *BucketListener) buckets() bucketapi.BucketInterface {
