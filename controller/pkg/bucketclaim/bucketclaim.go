@@ -157,20 +157,7 @@ func (b *BucketClaimListener) handleDeletion(ctx context.Context, bucketClaim *v
 			// The sidecar removes the claim's finalizer when the Bucket object is
 			// deleted; since we keep the shared Bucket, we must remove it here or
 			// this claim would hang forever.
-			return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				latest, gerr := b.bucketClaims(bucketClaim.Namespace).Get(ctx, bucketClaim.Name, metav1.GetOptions{})
-				if kubeerrors.IsNotFound(gerr) {
-					return nil
-				}
-				if gerr != nil {
-					return gerr
-				}
-				if controllerutil.RemoveFinalizer(latest, util.BucketClaimFinalizer) {
-					_, uerr := b.bucketClaims(latest.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
-					return uerr
-				}
-				return nil
-			})
+			return b.removeClaimFinalizer(ctx, bucketClaim)
 		}
 		if err := b.buckets().Delete(ctx, bucketName, metav1.DeleteOptions{}); err != nil && !kubeerrors.IsNotFound(err) {
 			klog.V(3).ErrorS(err, "Error deleting bucket",
@@ -180,9 +167,36 @@ func (b *BucketClaimListener) handleDeletion(ctx context.Context, bucketClaim *v
 		}
 		klog.V(5).Infof("last reference gone; requested deletion of bucket: %s for bucketClaim: %s",
 			bucketName, bucketClaim.ObjectMeta.Name)
+		// lazedo: release this claim ourselves too. The sidecar only removes
+		// the finalizer of bucket.spec.bucketClaim — the CREATOR — so a last
+		// binder that ADOPTED the bucket would hang forever waiting for a
+		// removal that never targets it. Deletion was requested with the
+		// binder's policy already written on the Bucket; deprovisioning
+		// proceeds independently and a failure stays visible on the
+		// terminating Bucket object.
+		return b.removeClaimFinalizer(ctx, bucketClaim)
 	}
 
 	return nil
+}
+
+// removeClaimFinalizer drops the claim-protection finalizer, conflict-safe;
+// an already-deleted claim counts as done.
+func (b *BucketClaimListener) removeClaimFinalizer(ctx context.Context, bucketClaim *v1alpha1.BucketClaim) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest, gerr := b.bucketClaims(bucketClaim.Namespace).Get(ctx, bucketClaim.Name, metav1.GetOptions{})
+		if kubeerrors.IsNotFound(gerr) {
+			return nil
+		}
+		if gerr != nil {
+			return gerr
+		}
+		if controllerutil.RemoveFinalizer(latest, util.BucketClaimFinalizer) {
+			_, uerr := b.bucketClaims(latest.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+			return uerr
+		}
+		return nil
+	})
 }
 
 // Delete processes a bucket for which bucket request is deleted

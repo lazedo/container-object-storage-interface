@@ -335,7 +335,9 @@ func (b *BucketListener) handleDeletion(ctx context.Context, bucket *v1alpha1.Bu
 		if !controllerutil.ContainsFinalizer(bucket, consts.BucketFinalizer) {
 			controllerutil.RemoveFinalizer(cur, consts.BucketFinalizer)
 		}
-	}); err != nil {
+	}); err != nil && !kubeerrors.IsNotFound(err) {
+		// lazedo: the bucket can finish deleting between our removals and
+		// this mirror write — already gone is the goal, not an error.
 		klog.V(3).ErrorS(err, "Error updating bucket after removing finalizers",
 			"bucket", bucket.ObjectMeta.Name)
 		return err
@@ -361,7 +363,9 @@ func (b *BucketListener) Delete(ctx context.Context, inputBucket *v1alpha1.Bucke
 
 		if err := b.updateClaimWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
 			controllerutil.RemoveFinalizer(cur, consts.BCFinalizer)
-		}); err != nil {
+		}); err != nil && !kubeerrors.IsNotFound(err) {
+			// lazedo: an already-deleted claim counts as done — erroring
+			// here retried forever against a claim that will never return.
 			klog.V(3).ErrorS(err, "Error removing bucketClaim finalizer",
 				"bucket", inputBucket.ObjectMeta.Name,
 				"bucketClaim", ref.Name)
@@ -417,7 +421,9 @@ func (b *BucketListener) deleteBucketOp(ctx context.Context, bucket *v1alpha1.Bu
 		ref := bucket.Spec.BucketClaim
 		if err := b.updateClaimWithRetry(ctx, ref.Namespace, ref.Name, func(cur *v1alpha1.BucketClaim) {
 			controllerutil.RemoveFinalizer(cur, consts.BCFinalizer)
-		}); err != nil {
+		}); err != nil && !kubeerrors.IsNotFound(err) {
+			// lazedo: tolerate an already-deleted claim (adopted last
+			// binders release themselves controller-side).
 			klog.V(3).ErrorS(err, "Error removing finalizer from bucketClaim",
 				"bucketClaim", ref.Name,
 				"bucket", bucket.ObjectMeta.Name)
