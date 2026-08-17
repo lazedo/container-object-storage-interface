@@ -26,6 +26,11 @@ type SecretS3 struct {
 	Region          string `json:"region"`
 	AccessKeyID     string `json:"accessKeyID"`
 	AccessSecretKey string `json:"accessSecretKey"`
+	// Uris is every URI the credential is valid at — in-cluster and public
+	// (same concept as the console's CONSOLE_MINIO_PUBLIC_URIS). Endpoint
+	// stays the driver's default choice; consumers with reachability needs
+	// of their own (e.g. presigning for off-cluster clients) pick from here.
+	Uris []string `json:"uris,omitempty"`
 }
 
 type SecretAzure struct {

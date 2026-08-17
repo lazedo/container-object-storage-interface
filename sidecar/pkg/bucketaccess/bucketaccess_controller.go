@@ -233,6 +233,15 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 			AccessKeyID:     val.Secrets[consts.S3SecretAccessKeyID],
 			AccessSecretKey: val.Secrets[consts.S3SecretAccessSecretKey],
 		}
+		// the driver may advertise every URI the credential is valid at
+		// (comma-separated); surface them for reachability-aware consumers.
+		if uris := val.Secrets[consts.S3Uris]; uris != "" {
+			for _, u := range strings.Split(uris, ",") {
+				if u = strings.TrimSpace(u); u != "" {
+					secretS3.Uris = append(secretS3.Uris, u)
+				}
+			}
+		}
 
 		bucketInfo.Spec.S3 = secretS3
 	} else if val, ok = credentials[consts.AzureKey]; ok {

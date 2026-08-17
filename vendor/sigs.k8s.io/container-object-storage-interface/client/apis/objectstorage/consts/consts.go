@@ -32,6 +32,7 @@ const (
 	S3SecretAccessKeyID        = "accessKeyID"
 	S3SecretAccessSecretKey    = "accessSecretKey"
 	S3Endpoint                 = "endpoint"
+	S3Uris                     = "uris"
 	S3Region                   = "region"
 	AzureSecretAccessToken     = "accessToken"
 	AzureSecretExpiryTimeStamp = "expiryTs"
