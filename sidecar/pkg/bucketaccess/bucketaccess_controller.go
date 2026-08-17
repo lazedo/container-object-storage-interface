@@ -367,33 +367,58 @@ func (bal *BucketAccessListener) Delete(ctx context.Context, bucketAccess *v1alp
 }
 
 func (bal *BucketAccessListener) deleteBucketAccessOp(ctx context.Context, bucketAccess *v1alpha1.BucketAccess) error {
-	// Fetching bucketClaim and corresponding bucket to get the bucketID
-	// for performing DriverRevokeBucketAccess request.
+	// Resolve the bucketID for DriverRevokeBucketAccess. The happy path goes
+	// through the BucketClaim, but deletion must NEVER wedge on an already
+	// -gone dependency (lazedo: an access deleted after its claim used to
+	// requeue forever, silently). When the claim is gone the Bucket object
+	// may still exist (adopted/Retain) and carries spec.bucketClaim, so
+	// recover it by reference; only when nothing can resolve the bucketID is
+	// revocation skipped — loudly, because the backend credential then
+	// outlives this access.
+	ns := bucketAccess.ObjectMeta.Namespace
 	bucketClaimName := bucketAccess.Spec.BucketClaimName
-	bucketClaim, err := bal.bucketClaims(bucketAccess.ObjectMeta.Namespace).Get(ctx, bucketClaimName, metav1.GetOptions{})
-	if err != nil {
+	bucketID := ""
+	bucketClaim, err := bal.bucketClaims(ns).Get(ctx, bucketClaimName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		bucket, berr := bal.buckets().Get(ctx, bucketClaim.Status.BucketName, metav1.GetOptions{})
+		if berr != nil && !kubeerrors.IsNotFound(berr) {
+			klog.V(3).ErrorS(berr, "Failed to fetch bucket", "bucket", bucketClaim.Status.BucketName)
+			return fmt.Errorf("failed to fetch bucket: %w", berr)
+		}
+		if berr == nil {
+			bucketID = bucket.Status.BucketID
+		}
+	case kubeerrors.IsNotFound(err):
+		bucketID = bal.bucketIDByClaimRef(ctx, ns, bucketClaimName)
+	default:
 		klog.V(3).ErrorS(err, "Failed to fetch bucketClaim", "bucketClaim", bucketClaimName)
 		return fmt.Errorf("failed to fetch bucketClaim: %w", err)
 	}
 
-	bucket, err := bal.buckets().Get(ctx, bucketClaim.Status.BucketName, metav1.GetOptions{})
-	if err != nil {
-		klog.V(3).ErrorS(err, "Failed to fetch bucket", "bucket", bucketClaim.Status.BucketName)
-		return fmt.Errorf("failed to fetch bucket: %w", err)
-	}
+	if bucketID != "" {
+		req := &cosi.DriverRevokeBucketAccessRequest{
+			BucketId:  bucketID,
+			AccountId: bucketAccess.Status.AccountID,
+		}
 
-	req := &cosi.DriverRevokeBucketAccessRequest{
-		BucketId:  bucket.Status.BucketID,
-		AccountId: bucketAccess.Status.AccountID,
-	}
-
-	// First we revoke the bucketAccess from the driver
-	if _, err := bal.provisionerClient.DriverRevokeBucketAccess(ctx, req); err != nil {
-		return fmt.Errorf("failed to revoke access: %w", err)
+		// First we revoke the bucketAccess from the driver
+		if _, err := bal.provisionerClient.DriverRevokeBucketAccess(ctx, req); err != nil {
+			return fmt.Errorf("failed to revoke access: %w", err)
+		}
+	} else {
+		klog.ErrorS(nil, "bucketClaim and bucket already gone; SKIPPING revocation — the backend credential outlives this access",
+			"bucketAccess", bucketAccess.ObjectMeta.Name,
+			"bucketClaim", bucketClaimName,
+			"accountId", bucketAccess.Status.AccountID)
 	}
 
 	credSecretName := bucketAccess.Spec.CredentialsSecretName
-	secret, err := bal.secrets(bucketAccess.ObjectMeta.Namespace).Get(ctx, credSecretName, metav1.GetOptions{})
+	secret, err := bal.secrets(ns).Get(ctx, credSecretName, metav1.GetOptions{})
+	if kubeerrors.IsNotFound(err) {
+		// secret already gone: nothing left to tear down but our finalizer.
+		return bal.removeBAFinalizer(ctx, bucketAccess)
+	}
 	if err != nil {
 		return err
 	}
@@ -427,20 +452,47 @@ func (bal *BucketAccessListener) deleteBucketAccessOp(ctx context.Context, bucke
 		return nil
 	}
 
-	if controllerutil.ContainsFinalizer(bucketAccess, consts.BAFinalizer) {
-		_, err = bal.updateBucketAccessWithRetry(ctx, bucketAccess.ObjectMeta.Namespace, bucketAccess.ObjectMeta.Name, func(cur *v1alpha1.BucketAccess) {
-			controllerutil.RemoveFinalizer(cur, consts.BAFinalizer)
-		})
-		if err != nil {
-			klog.V(3).ErrorS(err, "Error removing finalizer from bucketAccess",
-				"bucketAccess", bucketAccess.ObjectMeta.Name)
-			return err
-		}
+	return bal.removeBAFinalizer(ctx, bucketAccess)
+}
 
-		klog.V(5).Infof("Successfully removed finalizer from bucketAccess: %s", bucketAccess.ObjectMeta.Name)
+// removeBAFinalizer releases the access's own finalizer (idempotent).
+func (bal *BucketAccessListener) removeBAFinalizer(ctx context.Context, bucketAccess *v1alpha1.BucketAccess) error {
+	if !controllerutil.ContainsFinalizer(bucketAccess, consts.BAFinalizer) {
+		return nil
 	}
-
+	_, err := bal.updateBucketAccessWithRetry(ctx, bucketAccess.ObjectMeta.Namespace, bucketAccess.ObjectMeta.Name, func(cur *v1alpha1.BucketAccess) {
+		controllerutil.RemoveFinalizer(cur, consts.BAFinalizer)
+	})
+	if err != nil {
+		klog.V(3).ErrorS(err, "Error removing finalizer from bucketAccess",
+			"bucketAccess", bucketAccess.ObjectMeta.Name)
+		return err
+	}
+	klog.V(5).Infof("Successfully removed finalizer from bucketAccess: %s", bucketAccess.ObjectMeta.Name)
 	return nil
+}
+
+// bucketIDByClaimRef recovers a bucketID when the BucketClaim is already
+// deleted: Bucket objects are cluster-scoped and reference their claim in
+// spec.bucketClaim, so scan this driver's buckets for the dangling binding.
+// "" when no bucket references the claim anymore.
+func (bal *BucketAccessListener) bucketIDByClaimRef(ctx context.Context, ns, claimName string) string {
+	list, err := bal.buckets().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.V(3).ErrorS(err, "Failed to list buckets while recovering a deleted claim's bucket",
+			"bucketClaim", ns+"/"+claimName)
+		return ""
+	}
+	for i := range list.Items {
+		b := &list.Items[i]
+		if b.Spec.DriverName != bal.driverName {
+			continue
+		}
+		if ref := b.Spec.BucketClaim; ref != nil && ref.Namespace == ns && ref.Name == claimName {
+			return b.Status.BucketID
+		}
+	}
+	return ""
 }
 
 // lazedo: conflict-safe writers -- every attempt re-GETs and re-applies the
