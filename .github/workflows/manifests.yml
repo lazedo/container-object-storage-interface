@@ -38,9 +38,20 @@ jobs:
         run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Image for this commit must already exist on GHCR
+        # registry API probe, not `docker manifest inspect`: the docker CLI path
+        # fails against ghcr under GITHUB_TOKEN credentials even after a
+        # successful login (observed on the first live run), and it hides the
+        # reason; the token+manifests endpoints answer deterministically and the
+        # HTTP code is surfaced in the error.
         run: |
-          docker manifest inspect "ghcr.io/lazedo/objectstorage-controller:${{ steps.sha.outputs.short }}" >/dev/null 2>&1 \
-            || { echo "::error::ghcr.io/lazedo/objectstorage-controller:${{ steps.sha.outputs.short }} is not on GHCR — run the image workflow on this ref first"; exit 1; }
+          set -euo pipefail
+          TOK=$(curl -fsSL -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:lazedo/objectstorage-controller:pull" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${TOK}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/lazedo/objectstorage-controller/manifests/${{ steps.sha.outputs.short }}")
+          [ "${CODE}" = "200" ] || { echo "::error::ghcr.io/lazedo/objectstorage-controller:${{ steps.sha.outputs.short }} is not on GHCR (HTTP ${CODE}) — run the image workflow on this ref first"; exit 1; }
 
       - name: Assemble manifests pinned to this commit
         run: |
