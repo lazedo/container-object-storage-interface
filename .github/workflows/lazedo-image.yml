@@ -128,43 +128,13 @@ jobs:
           docker buildx imagetools inspect "${IMAGE}:${{ steps.sha.outputs.short }}"
           echo "\`${IMAGE}:${{ steps.sha.outputs.short }}\` (amd64+arm64)" >> "$GITHUB_STEP_SUMMARY"
 
-  # Publish the install manifests as an OCI artifact pinned to THIS commit's
-  # image — the pin is generated here, never by hand, so image and manifest
-  # cannot drift. Recovery is workflow_dispatch on a ref: it regenerates image
-  # AND manifest for that same sha — never a "latest image" lookup, which
-  # would couple a manifest at commit X with an image from commit Y.
+  # Publish the install manifests via the shared workflow (one source of
+  # truth: .github/workflows/manifests.yml, also runnable standalone via
+  # workflow_dispatch as the recovery path — it verifies the image exists
+  # instead of rebuilding it).
   manifests:
     needs: merge
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: fluxcd/flux2/action@v2.9.2
-
-      - name: Short SHA
-        id: sha
-        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
-      - name: Assemble manifests pinned to this commit
-        run: |
-          set -euo pipefail
-          SHORT="${{ steps.sha.outputs.short }}"
-          mkdir -p /tmp/manifests
-          sed -i -E "s#(image: ghcr\.io/lazedo/objectstorage-controller):[^[:space:]]+#\\1:${SHORT}#" controller/resources/deployment.yaml
-          kubectl kustomize . > /tmp/manifests/install.yaml
-          grep -q "objectstorage-controller:${SHORT}" /tmp/manifests/install.yaml
-
-      - name: Push OCI artifact
-        run: |
-          set -euo pipefail
-          flux push artifact "oci://ghcr.io/lazedo/manifests/objectstorage-controller:${{ steps.sha.outputs.short }}" \
-            --path /tmp/manifests \
-            --source "${{ github.server_url }}/${{ github.repository }}" \
-            --revision "${{ github.ref_name }}@sha1:${{ github.sha }}" \
-            --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
-          if [ "${{ github.ref_name }}" = "release-0.2" ] || [ "${{ github.ref_type }}" = "tag" ]; then
-            flux tag artifact "oci://ghcr.io/lazedo/manifests/objectstorage-controller:${{ steps.sha.outputs.short }}" \
-              --tag latest --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
-          fi
+    uses: ./.github/workflows/manifests.yml
