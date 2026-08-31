@@ -261,16 +261,14 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 		return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess, consts.ErrBucketInfoConversionFailed)
 	}
 
-	if _, err := bal.secrets(namespace).Get(ctx, secretCredName, metav1.GetOptions{}); err != nil {
-		if !kubeerrors.IsNotFound(err) {
-			klog.V(3).ErrorS(err,
-				"Failed to create secrets",
-				"bucketAccess", bucketAccess.ObjectMeta.Name,
-				"bucket", bucket.ObjectMeta.Name)
-			return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
-				fmt.Errorf("failed to fetch secrets: %w", err))
-		}
-
+	// UPSERT, never create-only: a retried grant re-mints credentials, and
+	// keeping a stale secret silently hands workloads keys that no longer
+	// match status.accountID (bitten 2026-08-31: secret carried grant #1's
+	// user while the access recorded grant #2's — a future revoke would
+	// delete #2 and leave #1 as live orphaned credentials).
+	existing, err := bal.secrets(namespace).Get(ctx, secretCredName, metav1.GetOptions{})
+	switch {
+	case kubeerrors.IsNotFound(err):
 		if _, err := bal.secrets(namespace).Create(ctx, &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       secretCredName,
@@ -281,15 +279,34 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 				"BucketInfo": string(stringData),
 			},
 			Type: v1.SecretTypeOpaque,
-		}, metav1.CreateOptions{}); err != nil {
-			if !kubeerrors.IsAlreadyExists(err) {
-				klog.V(3).ErrorS(err,
-					"Failed to create minted secret",
-					"bucketAccess", bucketAccess.ObjectMeta.Name,
-					"bucket", bucket.ObjectMeta.Name)
-				return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
-					fmt.Errorf("failed to create minted secret: %w", err))
-			}
+		}, metav1.CreateOptions{}); err != nil && !kubeerrors.IsAlreadyExists(err) {
+			klog.V(3).ErrorS(err,
+				"Failed to create minted secret",
+				"bucketAccess", bucketAccess.ObjectMeta.Name,
+				"bucket", bucket.ObjectMeta.Name)
+			return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
+				fmt.Errorf("failed to create minted secret: %w", err))
+		}
+	case err != nil:
+		klog.V(3).ErrorS(err,
+			"Failed to fetch secrets",
+			"bucketAccess", bucketAccess.ObjectMeta.Name,
+			"bucket", bucket.ObjectMeta.Name)
+		return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
+			fmt.Errorf("failed to fetch secrets: %w", err))
+	case string(existing.Data["BucketInfo"]) != string(stringData):
+		cur := existing.DeepCopy()
+		if cur.StringData == nil {
+			cur.StringData = map[string]string{}
+		}
+		cur.StringData["BucketInfo"] = string(stringData)
+		if _, err := bal.secrets(namespace).Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+			klog.V(3).ErrorS(err,
+				"Failed to refresh minted secret",
+				"bucketAccess", bucketAccess.ObjectMeta.Name,
+				"bucket", bucket.ObjectMeta.Name)
+			return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
+				fmt.Errorf("failed to refresh minted secret: %w", err))
 		}
 	}
 

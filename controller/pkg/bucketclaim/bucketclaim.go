@@ -500,7 +500,13 @@ func (b *BucketClaimListener) provisionBucketClaimOperation(ctx context.Context,
 
 		// Apply the status changes to the latest version
 		latest.Status.BucketName = statusBucketName
-		latest.Status.BucketReady = statusBucketReady
+		// MONOTONIC readiness: the sidecar flips claims to Ready the moment
+		// the driver provisions, racing this very update — writing our
+		// (possibly stale) false over its true parked a Bound claim as
+		// NotReady forever and the BucketAccess never granted (bitten
+		// 2026-08-31 on an adopted retained bucket). Ready only ever
+		// advances here; unbind/delete paths own any reset.
+		latest.Status.BucketReady = statusBucketReady || latest.Status.BucketReady
 		latest.Status.Adopted = statusAdopted
 		latest.Status.Binders = int32(binders)
 		apimeta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
