@@ -232,6 +232,7 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 			Region:          val.Secrets[consts.S3Region],
 			AccessKeyID:     val.Secrets[consts.S3SecretAccessKeyID],
 			AccessSecretKey: val.Secrets[consts.S3SecretAccessSecretKey],
+			CACert:          val.Secrets[consts.S3SecretCACert],
 		}
 		// the driver may advertise every URI the credential is valid at
 		// (comma-separated); surface them for reachability-aware consumers.

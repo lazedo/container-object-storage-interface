@@ -31,6 +31,10 @@ type SecretS3 struct {
 	// stays the driver's default choice; consumers with reachability needs
 	// of their own (e.g. presigning for off-cluster clients) pick from here.
 	Uris []string `json:"uris,omitempty"`
+	// CACert is the PEM CA that signs the endpoint when it is a private CA;
+	// a consumer trusts it to reach the endpoint without a cluster-wide CA.
+	// Empty for public certs.
+	CACert string `json:"caCert,omitempty"`
 }
 
 type SecretAzure struct {
