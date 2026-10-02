@@ -77,7 +77,9 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 
 	if bucketAccess.Status.AccessGranted && bucketAccess.Status.AccountID != "" {
 		klog.V(3).InfoS("BucketAccess already exists", bucketAccess.ObjectMeta.Name)
-		return nil
+		// lazedo: not granted again (that would mint new credentials); its
+		// secret gets the flat keys from its own BucketInfo (flatkeys.go).
+		return bal.backfillFlatKeys(ctx, bucketAccess)
 	}
 
 	bucketClaimName := bucketAccess.Spec.BucketClaimName
@@ -267,6 +269,8 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 	// match status.accountID (bitten 2026-08-31: secret carried grant #1's
 	// user while the access recorded grant #2's — a future revoke would
 	// delete #2 and leave #1 as live orphaned credentials).
+	// lazedo: the BucketInfo, and its flat keys next to it (flatkeys.go).
+	minted, _ := withFlatKeys(map[string][]byte{"BucketInfo": stringData}, bucketInfo)
 	existing, err := bal.secrets(namespace).Get(ctx, secretCredName, metav1.GetOptions{})
 	switch {
 	case kubeerrors.IsNotFound(err):
@@ -276,9 +280,7 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 				Namespace:  namespace,
 				Finalizers: []string{consts.SecretFinalizer},
 			},
-			StringData: map[string]string{
-				"BucketInfo": string(stringData),
-			},
+			Data: minted,
 			Type: v1.SecretTypeOpaque,
 		}, metav1.CreateOptions{}); err != nil && !kubeerrors.IsAlreadyExists(err) {
 			klog.V(3).ErrorS(err,
@@ -295,12 +297,14 @@ func (bal *BucketAccessListener) Add(ctx context.Context, inputBucketAccess *v1a
 			"bucket", bucket.ObjectMeta.Name)
 		return bal.recordError(inputBucketAccess, v1.EventTypeWarning, v1alpha1.FailedGrantAccess,
 			fmt.Errorf("failed to fetch secrets: %w", err))
-	case string(existing.Data["BucketInfo"]) != string(stringData):
+	case string(existing.Data["BucketInfo"]) != string(stringData) || flatKeysStale(existing.Data, bucketInfo):
 		cur := existing.DeepCopy()
-		if cur.StringData == nil {
-			cur.StringData = map[string]string{}
+		if cur.Data == nil {
+			cur.Data = map[string][]byte{}
 		}
-		cur.StringData["BucketInfo"] = string(stringData)
+		cur.Data["BucketInfo"] = stringData
+		cur.Data, _ = withFlatKeys(cur.Data, bucketInfo)
+		cur.StringData = nil
 		if _, err := bal.secrets(namespace).Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			klog.V(3).ErrorS(err,
 				"Failed to refresh minted secret",
